@@ -3,8 +3,8 @@
   "header": {
     "description": "pack.description",
     "name": "pack.name",
-    "uuid": "90ce7a3b-8477-49cf-9d35-7e56b27f7e9c",
-    "version": [1, 0, 4],
+    "uuid": "0322adf5-4a66-4d9c-a3bc-7ddcfec50b81",
+    "version": [1, 0, 0],
     "min_engine_version": [1, 21, 0]
   },
   "modules": [
@@ -12,13 +12,13 @@
       "description": "JavaScript module code",
       "language": "javascript",
       "type": "script",
-      "uuid": "c947417b-7bc9-4c35-85dc-2eafc2579200",
+      "uuid": "800672d9-626b-4f7e-968e-f1e8f5e1d943",
       "version": [1, 0, 4],
       "entry": "scripts/main.js"
     }
   ],
   "metadata": {
-    "authors": ["Lete114"],
+    "authors": ["WriterPass"],
     "license": "GPL-2.0",
     "url": "https://github.com/mcbe-mods/One-Click-Dig-Ore"
   },
