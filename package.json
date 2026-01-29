@@ -2,7 +2,7 @@
   "name": "one-click-digs",
   "private": true,
   "packageManager": "pnpm@8.6.11",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "type": "module",
   "scripts": {
     "preinstall": "node scripts/preinstall.js",
@@ -13,6 +13,8 @@
     "make-manifest":"",
     "build": "node scripts/build.js",
     "builds": "pnpm run clear && pnpm run copy && tsc && pnpm run build && pnpm run package",
+    "buildss": "pnpm run builds && pnpm run airdrop",
+    "airdrop":"node scripts/airdrop.js",
     "lint": "eslint src && prettier --check src",
     "lint:fix": "eslint --fix src && prettier --check --write src"
   },

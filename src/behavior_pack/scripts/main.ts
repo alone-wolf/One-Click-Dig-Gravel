@@ -1,163 +1,133 @@
-/* eslint-disable max-depth */
-/* eslint-disable camelcase */
-// main
 import {
   world,
-  system,
-  ItemStack,
+  EquipmentSlot,
   ItemLockMode,
   GameMode,
+  ItemEnchantableComponent,
+  ItemDurabilityComponent,
+  EntityEquippableComponent,
+  ItemStack,
   Player,
   Dimension,
-  EquipmentSlot,
-  EntityEquippableComponent,
-  ItemDurabilityComponent,
-  ItemEnchantableComponent
+  Vector3,
 } from '@minecraft/server'
-import { splitGroups } from '@mcbe-mods/utils'
 
-import shovel_level from './shovel_level'
+const TARGET_BLOCK_TYPE_ID = 'minecraft:stone_shovel'
 
-const GRAVEL_BLOCK_ID = 'minecraft:gravel'
-const FLINT_ITEM_ID = 'minecraft:flint'
+let globalPlayer: Player | null = null
 
-const isSurvivalPlayer = (dimension: Dimension, player: Player) =>
-  dimension.getPlayers({ gameMode: GameMode.survival }).some((p) => p.name === player.name)
+const SCAN_LIMIT = 64
 
-function getMaxBuildHeight(dimension: Dimension): number {
-  const heightRange = (dimension as { heightRange?: { max: number } }).heightRange
-  if (heightRange && typeof heightRange.max === 'number') return heightRange.max
-  return 256
+function checkBlockType(type: string): boolean {
+  globalPlayer?.sendMessage("blockType:" + type)
+  return type == 'minecraft:gravel'
 }
 
-function shouldConsumeDurability(unbreakingLevel: number): boolean {
-  if (unbreakingLevel <= 0) return true
-  return Math.floor(Math.random() * (unbreakingLevel + 1)) === 0
+function checkUserSneaking(player: Player): boolean {
+  player.sendMessage("player.isSneaking:" + player.isSneaking)
+  return player.isSneaking
 }
 
-function getFlintChance(fortuneLevel: number): number {
-  const level = Math.max(0, Math.min(fortuneLevel, 3))
-  const denominator = 10 - 2 * level
-  return 1 / denominator
+
+function checkTool(player: Player, tool: ItemStack): boolean {
+  player.sendMessage("toolTypeId:" + tool.typeId)
+  if (tool.typeId !== TARGET_BLOCK_TYPE_ID) return false
+
+  // ✓ 检查耐久组件
+  const durability = tool.getComponent(ItemDurabilityComponent.componentId) as ItemDurabilityComponent
+  if (!durability) return false
+  // ✓ 耐久度检查（剩余>=1）
+  const maxDurability = durability.maxDurability
+  let used = durability.damage
+  let leftDurability = maxDurability - used
+  if (leftDurability < 1) return false // 不够用了
+
+  // ✓ 检查附魔组件
+  const enchant = tool.getComponent(ItemEnchantableComponent.componentId) as ItemEnchantableComponent
+  if (!enchant) return false
+  // ✓ 排除有任何附魔的石镐
+  if (enchant.getEnchantments().length) return false
+
+  return true
 }
 
-world.afterEvents.playerBreakBlock.subscribe((e) => {
-  const { dimension, player, block } = e
+async function dig(player: Player, dimension: Dimension, location: Vector3, blockTypeId: string) {
+  globalPlayer = player
+  // ✓ 检查被破坏的方块是否为沙砾
+  if (!checkBlockType(blockTypeId)) return
+  // ✓ 检查玩家是否蹲着
+  if (!checkUserSneaking(player)) return
+  // ✓ 获取主手物品并判断是否为未附魔石镐
+  const equip = player.getComponent(EntityEquippableComponent.componentId) as EntityEquippableComponent
+  if (!equip) return
+  const hand = equip.getEquipmentSlot(EquipmentSlot.Mainhand)
+  const tool = hand.getItem()
+  if (!tool) return
+  if (!checkTool(player, tool)) return
+  hand.lockMode = ItemLockMode.slot
 
-  // Player must be sneaking and breaking gravel
-  if (!player.isSneaking || block.typeId !== GRAVEL_BLOCK_ID) return
+  player.sendMessage("check finished")
 
-  const equipmentInventory = player.getComponent(EntityEquippableComponent.componentId) as EntityEquippableComponent
-  if (!equipmentInventory) return
+  // let scanLimit1 = Math.min(leftDurability,scanLimit)
+  // ✓ 从被破坏的位置，向上最多64格扫描
+  // let damaged = 0
+  let { x, y, z } = location
 
-  const mainHand = equipmentInventory.getEquipmentSlot(EquipmentSlot.Mainhand)
-  const currentSlotItem = mainHand.getItem()
-  if (!currentSlotItem) return
+  for (let i = 1; i < SCAN_LIMIT; i++) {
+    const newY = y + i
+    if (newY >= 320) break
+    const scanBlock = dimension.getBlock({ x, y: newY, z })
+    if (!scanBlock) break
+    if (scanBlock.typeId !== TARGET_BLOCK_TYPE_ID) break
+    await new Promise<void>((resolve) => {
+      scanBlock.setType('air')
+      resolve()
+    })
 
-  // Must be holding a shovel that can dig gravel
-  if (!currentSlotItem.hasTag('is_shovel')) return
-  const shovel = shovel_level[currentSlotItem.typeId as keyof typeof shovel_level]
-  if (!shovel || !shovel.includes(GRAVEL_BLOCK_ID)) return
+    // 生成掉落物（100%掉落沙砾 + 25%概率掉落燧石）
+    let dropType = TARGET_BLOCK_TYPE_ID
+    if (Math.random() < 0.25) dropType = 'minecraft:flint'
+    dimension.spawnItem(new ItemStack(dropType, 1), { x, y: y + i, z })
+  }
 
-  const survivalPlayer = isSurvivalPlayer(dimension, player)
-  if (!survivalPlayer) return
+  // for (let i = 0; i < scanLimit && y + i < 320; i++) {
+  //   const scanBlock = dimension.getBlock({ x, y: y + i, z })
 
-  const itemDurability = currentSlotItem.getComponent(ItemDurabilityComponent.componentId) as ItemDurabilityComponent
-  if (!itemDurability) return
+  //   // 如果不是沙砾或为空，停止扫描
+  //   if (!scanBlock || scanBlock.typeId !== TARGET_BLOCK_TYPE_ID) break
 
-  const enchantments = currentSlotItem.getComponent(ItemEnchantableComponent.componentId) as
-    | ItemEnchantableComponent
-    | undefined
+  //   // 破坏沙砾
+  //   await new Promise<void>((resolve) => {
+  //     scanBlock.setType('air')
+  //     resolve()
+  //   })
+  //   damaged++
 
-  const unbreaking = enchantments?.getEnchantment('unbreaking')?.level ?? 0
-  const silkTouch = enchantments?.hasEnchantment('silk_touch') ?? false
-  const fortune = enchantments?.getEnchantment('fortune')?.level ?? 0
+  //   // 生成掉落物（100%掉落沙砾 + 25%概率掉落燧石）
+  //   let dropType = TARGET_BLOCK_TYPE_ID
+  //   if (Math.random() < 0.25) dropType = 'minecraft:flint'
+  //   dimension.spawnItem(new ItemStack(dropType, 1), { x, y: y + i, z })
+  // }
 
-  let damage = itemDurability.damage
-  const maxDurability = itemDurability.maxDurability
-  let remaining = maxDurability - damage
+  // if (damaged > 0) {
+  //   // ✓ 更新耐久度，保留1点
+  //   durability.damage = used + damaged
+  //   if (durability.damage >= maxDurability) durability.damage = maxDurability - 1
+  //   hand.setItem(tool)
+  //   hand.lockMode = ItemLockMode.none
+  // }
+  globalPlayer = null
+}
 
-  // Preserve 1 durability; let vanilla handle when too low
-  if (remaining <= 1) return
+// 监听破坏方块事件
+world.afterEvents.playerBreakBlock.subscribe(async (e) => {
+  const { player, block, dimension } = e
+  // ✓ 检查否生存模式
+  if (player.getGameMode() !== GameMode.survival) return
 
-  const dropLocation = { ...block.location }
-  mainHand.lockMode = ItemLockMode.slot
+  player.sendMessage("you dig")
 
-  system.run(() => {
-    try {
-      const lockedItem = mainHand.getItem()
-      if (!lockedItem) return
-
-      const lockedDurability = lockedItem.getComponent(ItemDurabilityComponent.componentId) as
-        | ItemDurabilityComponent
-        | undefined
-      if (!lockedDurability) return
-
-      const lockedEnchantments = lockedItem.getComponent(ItemEnchantableComponent.componentId) as
-        | ItemEnchantableComponent
-        | undefined
-
-      const lockedUnbreaking = lockedEnchantments?.getEnchantment('unbreaking')?.level ?? unbreaking
-      const lockedSilkTouch = lockedEnchantments?.hasEnchantment('silk_touch') ?? silkTouch
-      const lockedFortune = lockedEnchantments?.getEnchantment('fortune')?.level ?? fortune
-
-      let currentDamage = lockedDurability.damage
-      const currentMaxDurability = lockedDurability.maxDurability
-      let currentRemaining = currentMaxDurability - currentDamage
-
-      if (currentRemaining <= 1) return
-
-      const maxY = getMaxBuildHeight(dimension)
-      let gravelCount = 0
-      let flintCount = 0
-      const flintChance = lockedSilkTouch ? 0 : getFlintChance(lockedFortune)
-
-      for (let y = dropLocation.y; y <= maxY; y++) {
-        if (currentRemaining <= 1) break
-
-        const target = dimension.getBlock({ x: dropLocation.x, y, z: dropLocation.z })
-        if (!target) break
-        if (target.typeId !== GRAVEL_BLOCK_ID) break
-
-        target.setType('minecraft:air')
-
-        if (lockedSilkTouch) {
-          gravelCount++
-        } else if (Math.random() < flintChance) {
-          flintCount++
-        } else {
-          gravelCount++
-        }
-
-        if (shouldConsumeDurability(lockedUnbreaking)) {
-          currentDamage++
-          currentRemaining = currentMaxDurability - currentDamage
-        }
-      }
-
-      if (gravelCount > 0) {
-        splitGroups(gravelCount).forEach((group) => {
-          dimension.spawnItem(new ItemStack(GRAVEL_BLOCK_ID, group), dropLocation)
-        })
-      }
-
-      if (flintCount > 0) {
-        splitGroups(flintCount).forEach((group) => {
-          dimension.spawnItem(new ItemStack(FLINT_ITEM_ID, group), dropLocation)
-        })
-      }
-
-      lockedDurability.damage = currentDamage
-      mainHand.setItem(lockedItem)
-    } catch (_error) {
-      /* eslint-disable no-console */
-      const error = _error as Error
-      console.error(error.name)
-      console.error(error.message)
-      console.error(error)
-      /* eslint-enable no-console */
-    } finally {
-      mainHand.lockMode = ItemLockMode.none
-    }
-  })
+  const currentBreakBlock = e.brokenBlockPermutation
+  const blockTypeId = currentBreakBlock.type.id
+  dig(player, dimension, block.location, blockTypeId)
 })

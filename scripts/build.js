@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from 'fs'
+import { existsSync, readFileSync,writeFileSync, rmSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join } from 'path'
 import { rollup } from 'rollup'
@@ -27,11 +27,18 @@ if (existsSync(manifestPath)) {
 
   const modules = json?.modules ? json.modules : []
 
+  const versionList = resolveVersion()
+  json.header.version = versionList
+
   for (const item of modules) {
     if (item?.language?.toLowerCase() === 'javascript' && item?.type?.toLowerCase() === 'script' && item?.entry) {
       build(join(BPPath, item.entry))
     }
+    item.version = versionList
   }
+
+  const jsonString = JSON.stringify(json,null,2)
+  writeFileSync(manifestPath,jsonString)
 }
 
 async function build(entry) {
@@ -63,3 +70,16 @@ async function build(entry) {
   }
   process.exit(buildFailed ? 1 : 0)
 }
+
+function resolveVersion() {
+  const pkgPath = join(rootPath,"package.json")
+  const c = readJSONSync(pkgPath)
+  const versionList = c.version
+    .split('.')
+    .map(v => Number.parseInt(v, 10))
+  if (versionList.some(v => Number.isNaN(v))) {
+    throw new Error(`version 格式非法: ${pkg.version}`)
+  }
+  return versionList
+}
+
