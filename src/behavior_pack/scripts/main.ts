@@ -1,171 +1,163 @@
 /* eslint-disable max-depth */
 /* eslint-disable camelcase */
+// main
 import {
   world,
+  system,
   ItemStack,
   ItemLockMode,
   GameMode,
   Player,
-  Vector3,
   Dimension,
   EquipmentSlot,
   EntityEquippableComponent,
   ItemDurabilityComponent,
   ItemEnchantableComponent
 } from '@minecraft/server'
-import { splitGroups, getRandomRangeValue, getRadiusRange } from '@mcbe-mods/utils'
+import { splitGroups } from '@mcbe-mods/utils'
 
-import pickaxe_level from './pickaxe_level'
-import ore_map from './ore_map'
+import shovel_level from './shovel_level'
+
+const GRAVEL_BLOCK_ID = 'minecraft:gravel'
+const FLINT_ITEM_ID = 'minecraft:flint'
 
 const isSurvivalPlayer = (dimension: Dimension, player: Player) =>
   dimension.getPlayers({ gameMode: GameMode.survival }).some((p) => p.name === player.name)
 
-world.afterEvents.playerBreakBlock.subscribe(async (e) => {
-  const { dimension, player, block } = e
-  const currentBreakBlock = e.brokenBlockPermutation
-  const blockTypeId = currentBreakBlock.type.id
-  digOre(player, dimension, block.location, blockTypeId)
-})
+function getMaxBuildHeight(dimension: Dimension): number {
+  const heightRange = (dimension as { heightRange?: { max: number } }).heightRange
+  if (heightRange && typeof heightRange.max === 'number') return heightRange.max
+  return 256
+}
 
-/**
- *
- * @param {Player} player
- * @param {Dimension} dimension
- * @param {Vector3} location
- * @param {string} blockTypeId
- * @returns
- */
-// eslint-disable-next-line max-statements
-async function digOre(player: Player, dimension: Dimension, location: Vector3, blockTypeId: string) {
+function shouldConsumeDurability(unbreakingLevel: number): boolean {
+  if (unbreakingLevel <= 0) return true
+  return Math.floor(Math.random() * (unbreakingLevel + 1)) === 0
+}
+
+function getFlintChance(fortuneLevel: number): number {
+  const level = Math.max(0, Math.min(fortuneLevel, 3))
+  const denominator = 10 - 2 * level
+  return 1 / denominator
+}
+
+world.afterEvents.playerBreakBlock.subscribe((e) => {
+  const { dimension, player, block } = e
+
+  // Player must be sneaking and breaking gravel
+  if (!player.isSneaking || block.typeId !== GRAVEL_BLOCK_ID) return
+
   const equipmentInventory = player.getComponent(EntityEquippableComponent.componentId) as EntityEquippableComponent
   if (!equipmentInventory) return
 
   const mainHand = equipmentInventory.getEquipmentSlot(EquipmentSlot.Mainhand)
+  const currentSlotItem = mainHand.getItem()
+  if (!currentSlotItem) return
 
-  try {
-    const currentSlotItem = mainHand.getItem()
-    if (!currentSlotItem) return
+  // Must be holding a shovel that can dig gravel
+  if (!currentSlotItem.hasTag('is_shovel')) return
+  const shovel = shovel_level[currentSlotItem.typeId as keyof typeof shovel_level]
+  if (!shovel || !shovel.includes(GRAVEL_BLOCK_ID)) return
 
-    const pickaxe = pickaxe_level[currentSlotItem.typeId as keyof typeof pickaxe_level]
+  const survivalPlayer = isSurvivalPlayer(dimension, player)
+  if (!survivalPlayer) return
 
-    // The player is not stalking or not holding an axe, one of the conditions is not met will end directly
-    if (!player.isSneaking || !currentSlotItem.hasTag('is_pickaxe')) return
+  const itemDurability = currentSlotItem.getComponent(ItemDurabilityComponent.componentId) as ItemDurabilityComponent
+  if (!itemDurability) return
 
-    const survivalPlayer = isSurvivalPlayer(dimension, player)
+  const enchantments = currentSlotItem.getComponent(ItemEnchantableComponent.componentId) as
+    | ItemEnchantableComponent
+    | undefined
 
-    if (survivalPlayer) mainHand.lockMode = ItemLockMode.slot
+  const unbreaking = enchantments?.getEnchantment('unbreaking')?.level ?? 0
+  const silkTouch = enchantments?.hasEnchantment('silk_touch') ?? false
+  const fortune = enchantments?.getEnchantment('fortune')?.level ?? 0
 
-    const itemDurability = currentSlotItem.getComponent(ItemDurabilityComponent.componentId) as ItemDurabilityComponent
-    const enchantments = currentSlotItem.getComponent(ItemEnchantableComponent.componentId) as ItemEnchantableComponent
+  let damage = itemDurability.damage
+  const maxDurability = itemDurability.maxDurability
+  let remaining = maxDurability - damage
 
-    if (!enchantments || !itemDurability) return
+  // Preserve 1 durability; let vanilla handle when too low
+  if (remaining <= 1) return
 
-    const unbreaking = enchantments.getEnchantment('unbreaking')?.level || 0
-    const silk_touch = enchantments.hasEnchantment('silk_touch')
-    const fortune = enchantments.getEnchantment('fortune')?.level || 0
-    // https://minecraft.fandom.com/wiki/Unbreaking
-    let itemMaxDamage = itemDurability.damage * (1 + unbreaking)
-    const itemMaxDurability = itemDurability.maxDurability * (1 + unbreaking)
+  const dropLocation = { ...block.location }
+  mainHand.lockMode = ItemLockMode.slot
 
-    const blockTypeIdRemoveLit = blockTypeId.replace('lit_', '')
+  system.run(() => {
+    try {
+      const lockedItem = mainHand.getItem()
+      if (!lockedItem) return
 
-    /**
-     * Store all coordinates of the same wood type
-     * @type { Set<string> }
-     */
-    const set = new Set()
+      const lockedDurability = lockedItem.getComponent(ItemDurabilityComponent.componentId) as
+        | ItemDurabilityComponent
+        | undefined
+      if (!lockedDurability) return
 
-    const stack = [...getRadiusRange(location)]
-    // Iterative processing of proximity squares
-    while (stack.length > 0) {
-      // Get from the last one (will modify the original array)
-      const _block = dimension.getBlock(stack.shift()!)
+      const lockedEnchantments = lockedItem.getComponent(ItemEnchantableComponent.componentId) as
+        | ItemEnchantableComponent
+        | undefined
 
-      if (!_block) continue
+      const lockedUnbreaking = lockedEnchantments?.getEnchantment('unbreaking')?.level ?? unbreaking
+      const lockedSilkTouch = lockedEnchantments?.hasEnchantment('silk_touch') ?? silkTouch
+      const lockedFortune = lockedEnchantments?.getEnchantment('fortune')?.level ?? fortune
 
-      const typeId = _block.typeId
+      let currentDamage = lockedDurability.damage
+      const currentMaxDurability = lockedDurability.maxDurability
+      let currentRemaining = currentMaxDurability - currentDamage
 
-      // handle lit_redstone_ore
-      const isEqual = typeId.replace('lit_', '') === blockTypeIdRemoveLit
-      if (isEqual && pickaxe.includes(typeId)) {
-        const pos = JSON.stringify(_block.location)
+      if (currentRemaining <= 1) return
 
-        // If the coordinates exist, skip this iteration and proceed to the next iteration
-        if (set.has(pos)) continue
+      const maxY = getMaxBuildHeight(dimension)
+      let gravelCount = 0
+      let flintCount = 0
+      const flintChance = lockedSilkTouch ? 0 : getFlintChance(lockedFortune)
 
-        itemMaxDamage++
-        if (survivalPlayer && itemMaxDamage >= itemMaxDurability) {
-          continue
+      for (let y = dropLocation.y; y <= maxY; y++) {
+        if (currentRemaining <= 1) break
+
+        const target = dimension.getBlock({ x: dropLocation.x, y, z: dropLocation.z })
+        if (!target) break
+        if (target.typeId !== GRAVEL_BLOCK_ID) break
+
+        target.setType('minecraft:air')
+
+        if (lockedSilkTouch) {
+          gravelCount++
+        } else if (Math.random() < flintChance) {
+          flintCount++
+        } else {
+          gravelCount++
         }
 
-        // Asynchronous execution to reduce game lag and game crashes
-        await new Promise<void>((resolve) => {
-          _block.setType('air')
-          resolve()
+        if (shouldConsumeDurability(lockedUnbreaking)) {
+          currentDamage++
+          currentRemaining = currentMaxDurability - currentDamage
+        }
+      }
+
+      if (gravelCount > 0) {
+        splitGroups(gravelCount).forEach((group) => {
+          dimension.spawnItem(new ItemStack(GRAVEL_BLOCK_ID, group), dropLocation)
         })
-
-        set.add(pos)
-
-        // Get the squares adjacent to the new wood to append to the iteration stack
-        stack.push(...getRadiusRange(_block.location))
       }
+
+      if (flintCount > 0) {
+        splitGroups(flintCount).forEach((group) => {
+          dimension.spawnItem(new ItemStack(FLINT_ITEM_ID, group), dropLocation)
+        })
+      }
+
+      lockedDurability.damage = currentDamage
+      mainHand.setItem(lockedItem)
+    } catch (_error) {
+      /* eslint-disable no-console */
+      const error = _error as Error
+      console.error(error.name)
+      console.error(error.message)
+      console.error(error)
+      /* eslint-enable no-console */
+    } finally {
+      mainHand.lockMode = ItemLockMode.none
     }
-
-    const _ore = ore_map[blockTypeId as keyof typeof ore_map]
-    if (!_ore) return
-
-    if (silk_touch && _ore.support.silk_touch) {
-      // Generate aggregated drops based on the number of item drops to reduce the number of physical drops in the game
-      splitGroups(set.size).forEach((group) => {
-        dimension.spawnItem(new ItemStack(blockTypeIdRemoveLit, group), location)
-      })
-    } else {
-      // Avoid modifying reference types
-      const ore = {
-        item: _ore.item,
-        xp: [..._ore.xp],
-        probability: [..._ore.probability]
-      }
-
-      // add fortune
-      if (fortune && _ore.support.fortune) {
-        const maxProbability = ore.probability.pop() as number
-        ore.probability.push(maxProbability + fortune)
-      }
-
-      // Calculate the probability of drops
-      const oreMap = { item: 0, xp: 0 }
-      for (let i = 0; i < set.size; i++) {
-        oreMap.xp += getRandomRangeValue(ore.xp[0], ore.xp[1])
-        oreMap.item += getRandomRangeValue(ore.probability[0], ore.probability[1])
-      }
-
-      // spawn experience orbs
-      for (let i = 0; i < oreMap.xp; i++) {
-        dimension.spawnEntity('xp_orb', player.location)
-      }
-
-      // Generate aggregated drops based on the number of item drops to reduce the number of physical drops in the game
-      splitGroups(oreMap.item).forEach((group) => {
-        dimension.spawnItem(new ItemStack(ore.item, group), location)
-      })
-    }
-
-    if (survivalPlayer) {
-      // Set axe damage level
-      const damage = Math.ceil((itemMaxDamage * 1) / (1 + unbreaking))
-      itemDurability.damage = damage > itemDurability.maxDurability ? itemDurability.maxDurability : damage
-      mainHand.setItem(currentSlotItem)
-    }
-  } catch (_error) {
-    /* eslint-disable no-console */
-    const error = _error as Error
-    console.error(error.name)
-    console.error(error.message)
-    console.error(error)
-    /* eslint-enable no-console */
-  } finally {
-    mainHand.lockMode = ItemLockMode.none
-  }
-}
+  })
+})
